@@ -1,0 +1,244 @@
+/* =========================================================
+   R Markdown Professional Academic Theme
+   - TOC left sticky (no overlap)
+   - Georgia body / Helvetica headings
+   - Clean tables and code
+   - Stable grid fix
+   ========================================================= */
+
+/* ---------- Base page ---------- */
+
+body {
+    font-family: "Georgia", "Times New Roman", serif;
+    font-size: 17px;
+    line-height: 1.7;
+    color: #2c3e50;
+    background-color: #ffffff;
+    margin: 0;
+    padding: 0;
+  }
+  
+  /* ---------- Layout grid ---------- */
+  
+  .main-container {
+    max-width: 1200px !important;
+    margin: 0 auto !important;
+    padding: 40px 30px !important;
+  
+    display: grid;
+    grid-template-columns: 280px minmax(0, 1fr);
+    gap: 30px;
+  }
+  
+  /* Force placement stability */
+  
+  #TOC {
+    grid-column: 1;
+    grid-row: 1 / span 999;
+  }
+  
+  .main-container > :not(#TOC) {
+    grid-column: 2;
+    min-width: 0;
+  }
+  
+  /* ---------- TOC styling ---------- */
+  
+  #TOC {
+    position: sticky;
+    top: 30px;
+  
+    width: 260px;
+    max-height: calc(100vh - 60px);
+    overflow-y: auto;
+  
+    background-color: #f8f9fa;
+    border-left: 4px solid #2c3e50;
+    padding: 18px 16px;
+    font-size: 14px;
+  }
+  
+  #TOC ul {
+    list-style-type: none;
+    padding-left: 10px;
+    margin: 0;
+  }
+  
+  #TOC li {
+    margin-bottom: 8px;
+  }
+  
+  #TOC a {
+    color: #1f618d;
+    text-decoration: none;
+    font-weight: 500;
+  }
+  
+  #TOC a:hover {
+    text-decoration: underline;
+  }
+  
+  /* ---------- Headings ---------- */
+  
+  h1, h2, h3, h4 {
+    font-family: "Helvetica Neue", Arial, sans-serif;
+    font-weight: 600;
+    margin-top: 2em;
+    margin-bottom: 0.8em;
+    color: #1a252f;
+  }
+  
+  h1 {
+    font-size: 32px;
+    border-bottom: 3px solid #2c3e50;
+    padding-bottom: 10px;
+    margin-top: 0.2em;
+  }
+  
+  h2 {
+    font-size: 26px;
+    border-bottom: 2px solid #dfe6e9;
+    padding-bottom: 6px;
+  }
+  
+  h3 {
+    font-size: 22px;
+  }
+  
+  h4 {
+    font-size: 18px;
+  }
+  
+  /* ---------- Paragraphs ---------- */
+  
+  p {
+    margin-bottom: 1.2em;
+    text-align: justify;
+  }
+  
+  /* ---------- Links ---------- */
+  
+  a {
+    color: #1f618d;
+    text-decoration: none;
+    font-weight: 500;
+  }
+  
+  a:hover {
+    text-decoration: underline;
+  }
+  
+  /* ---------- Tables ---------- */
+  
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 20px;
+    margin-bottom: 30px;
+    font-size: 15px;
+  }
+  
+  th {
+    background-color: #2c3e50;
+    color: white;
+    padding: 10px;
+    text-align: left;
+  }
+  
+  td {
+    padding: 10px;
+    border-bottom: 1px solid #ecf0f1;
+  }
+  
+  tr:nth-child(even) {
+    background-color: #f8f9fa;
+  }
+  
+  /* ---------- Code blocks ---------- */
+  
+  pre {
+    background-color: #f4f6f7;
+    border-left: 5px solid #2c3e50;
+    padding: 15px;
+    overflow-x: auto;
+    border-radius: 4px;
+  }
+  
+  code {
+    font-family: "Courier New", monospace;
+    font-size: 14px;
+    color: #c0392b;
+  }
+  
+  p code, li code, td code {
+    background: #f4f6f7;
+    padding: 2px 6px;
+    border-radius: 4px;
+  }
+  
+  /* ---------- Figures ---------- */
+  
+  img {
+    display: block;
+    margin: 30px auto;
+    max-width: 100%;
+  }
+  
+  .caption, .figure-caption {
+    text-align: center;
+    font-style: italic;
+    font-size: 14px;
+    color: #7f8c8d;
+  }
+  
+  /* ---------- Blockquotes ---------- */
+  
+  blockquote {
+    border-left: 5px solid #1f618d;
+    padding-left: 15px;
+    color: #34495e;
+    font-style: italic;
+    background-color: #f4f6f7;
+    margin: 20px 0;
+  }
+  
+  /* ---------- Math ---------- */
+  
+  .MathJax_Display {
+    margin: 25px 0 !important;
+  }
+  
+  /* ---------- Separators ---------- */
+  
+  hr {
+    margin-top: 50px;
+    margin-bottom: 30px;
+    border: 0;
+    height: 1px;
+    background: #dfe6e9;
+  }
+  
+  /* ---------- Responsive ---------- */
+  
+  @media (max-width: 980px) {
+  
+    .main-container {
+      grid-template-columns: 1fr;
+      padding: 25px 18px !important;
+    }
+  
+    #TOC {
+      position: relative;
+      grid-column: 1;
+      grid-row: auto;
+      width: auto;
+      max-height: none;
+    }
+  
+    .main-container > :not(#TOC) {
+      grid-column: 1;
+    }
+  }
+  
+  
+  

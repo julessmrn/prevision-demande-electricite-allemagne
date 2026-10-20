@@ -1,0 +1,1195 @@
+---
+title: "Demande d'électricité en Allemagne"
+author: "Jules Marin - Master IREF-ERDS"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    css: projetST1.css
+    toc: true
+    toc_float: false
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+```
+
+
+# Préparation des données:
+
+```{r}
+# Nettoyage minimal du workspace 
+# R efface les objets existants pour éviter les collisions de noms.
+rm(list = ls())
+
+# R fixe une option qui empêche la notation scientifique dans les sorties.
+options(scipen = 999)
+
+# Chargement des packages 
+# R charge tidyverse pour manipuler les données en pipeline (dplyr, ggplot2), lubridate pour convertir proprement les dates et urca pour les tests ADF (ur.df) et Zivot-Andrews (ur.za).
+suppressWarnings(suppressPackageStartupMessages({
+  library(tidyverse)
+  #library(lubridate)
+  library(urca)
+  library(CADFtest)
+  library(forecast)
+  library(lmtest)
+  library(zoo)
+  library(foreach)
+  library(doSNOW)
+  library(parallel)
+  library(TSA)
+  library(FinTS)
+}))
+
+# Importation des données 
+# R lit le fichier CSV source et stocke la table dans l’objet data.
+data <- read.csv("data/monthly_full_release_long_format.csv",na.strings = "", stringsAsFactors = FALSE,  encoding = "UTF-8")
+str(data)
+```
+
+
+```{r}
+# Filtrage Allemagne
+# dplyr conserve uniquement les lignes dont la colonne Area vaut "Germany".
+germany <-subset(data, Area=="Germany", select = c(Date,Variable,Value))
+
+# Extraction de la série cible (Demande d’électricité) 
+elec_DE <-subset(germany,
+                 Variable=="Demand")%>%
+  mutate(Date = as.Date(Date)) %>%   # R convertit la colonne Date en type Date
+  arrange(Date)   
+
+# Contrôles qualité 
+# R affiche le nombre d’observations et la période couverte.
+cat("Nombre d'observations =", nrow(elec_DE), "\n")
+cat("Début =",
+    as.character(min(elec_DE$Date)),
+    "Fin =",
+    as.character(max(elec_DE$Date)),
+    "\n")
+
+# R teste la présence de valeurs manquantes dans la variable expliquée.
+cat("Nombre de NA dans Value =", sum(is.na(elec_DE$Value)), "\n")
+
+# R vérifie l’unicité temporelle : une date ne doit pas apparaître deux fois.
+cat("Nombre de dates distinctes =", n_distinct(elec_DE$Date), "\n")
+
+# R détecte d’éventuelles dates manquantes dans la séquence mensuelle.
+# (On crée une grille mensuelle complète puis on compare.)
+grille_dates <- seq.Date(from = min(elec_DE$Date),
+                         to   = max(elec_DE$Date),
+                         by   = "month")
+
+dates_manquantes <- setdiff(grille_dates, elec_DE$Date)
+cat("Nombre de mois manquants dans la série =", length(dates_manquantes), "\n")
+```
+
+
+<p> On contrôle les NA, doublons de dates, et trous mensuels. La série extraite comporte n = 131 observations mensuelles de 2015-01-01 à 2025-11-01, sans valeurs manquantes sur la variable Value (NA = 0) et sans mois manquant (mois manquants = [0]). Ces vérifications garantissent la validité des tests de racine unitaire appliqués ensuite.</p>
+
+
+# Contexte et choix du pays:
+
+## Pourquoi avoir choisit l'Allemagne ?
+
+<p> L’Allemagne est un cas d’étude pertinent pour une série temporelle sur la demande d’électricité pour plusieurs raisons complémentaires et documentées. Premièrement, il s’agit de la plus grande économie d’Europe et l’un des principaux marchés électriques du continent, ce qui en fait un exemple significatif de pays développé confronté aux défis énergétiques du XXIᵉ siècle. Deuxièmement, l’Allemagne a mené depuis les années 2000 une politique énergétique ambitieuse appelée Energiewende visant à transformer radicalement son mix électrique vers les énergies renouvelables (100% en 2050), ce qui influe directement sur la demande et son évolution structurelle. En 2025, les sources renouvelables couvraient près de 56 % de la consommation brute d’électricité, un record historique qui reflète l’ampleur de cette transformation du système électrique et qui rend l’évolution de la demande particulièrement intéressante à analyser. Enfin, l’Allemagne a subi plusieurs chocs exogènes majeurs au cours de la période étudiée : la pandémie de COVID-19, qui a freiné l’activité industrielle et modifié les profils de consommation, ainsi que la crise énergétique provoquée par la guerre en Ukraine, qui a affecté les prix de l’énergie, les importations et les stratégies d’approvisionnement. Ces événements rendent l’étude des séries temporelles de la demande allemande particulièrement riche pour identifier ruptures, variations saisonnières et changements de régime macroéconomique. </p>
+
+
+## Contexte de l'électricité en Allemagne entre 2015 et 2025 : 
+
+<p>Entre 2015 et 2025, la demande d’électricité en Allemagne s’est inscrite dans une trajectoire marquée par une relative stabilité jusqu’en 2019, suivie de deux ruptures majeures : la pandémie de COVID-19 et la crise énergétique liée à la guerre en Ukraine. En 2015, la consommation brute d’électricité atteignait environ 600 TWh, niveau caractéristique d’une économie fortement industrialisée (AGEB, bilans énergétiques). Après plusieurs années de légère érosion liée aux gains d’efficacité énergétique, la demande a chuté en 2020 autour de 560 TWh sous l’effet du ralentissement industriel et des confinements (Bundesnetzagentur – SMARD ; AGEB).</p> 
+
+<p>La consommation a connu un rebond partiel en 2021, avant de reculer de nouveau en 2022 et 2023 dans un contexte de hausse exceptionnelle des prix de l’énergie consécutive à la réduction des livraisons de gaz russe. L’AGEB indique que la consommation d’électricité a diminué d’environ 4 % en 2022, puis encore en 2023, atteignant un niveau historiquement bas depuis le début des années 2010 (AGEB, rapports annuels). Reuters confirme qu’en 2024, la consommation énergétique globale allemande a encore reculé, reflétant une demande industrielle affaiblie et des ajustements structurels (Reuters, 2025). Les données officielles du portail SMARD montrent qu’en 2025 la consommation s’est stabilisée avec une variation annuelle d’environ +0,1 %, suggérant une phase de palier après plusieurs années de contraction (Bundesnetzagentur – SMARD).</p> 
+
+<p>Concernant l’origine de l’électricité consommée, le mix a profondément évolué sur la période. En 2015, la demande était encore largement satisfaite par le charbon (lignite et houille), le gaz naturel et le nucléaire, les renouvelables représentant environ un tiers de la production (Electricity Sector in Germany, données historiques). La transformation s’est accélérée au cours de la décennie : en 2024–2025, les énergies renouvelables (éolien, solaire, biomasse, hydraulique) ont couvert environ 55–59 % de la consommation brute d’électricité selon l’Agence fédérale de l’environnement et l’institut Fraunhofer ISE (Umweltbundesamt ; Fraunhofer ISE, 2026). L’éolien constitue la première source individuelle, suivi du solaire photovoltaïque.</p>
+
+<p>Parallèlement, l’Allemagne a achevé sa sortie du nucléaire en avril 2023, ce qui a modifié la structure d’approvisionnement de la demande intérieure (Ministère fédéral de l’économie et de la protection du climat – BMWK). Depuis 2023, le pays est devenu plus dépendant des importations nettes d’électricité certaines années, notamment lors des périodes de faible production renouvelable, ce qui influence indirectement la manière dont la demande nationale est satisfaite (Bundesnetzagentur – SMARD).</p> 
+
+<p>Ainsi, sur la période 2015–2025, la demande d’électricité allemande se caractérise par : une stagnation suivie d’une rupture baissière structurelle, une forte sensibilité aux chocs macroéconomiques (COVID, crise énergétique), une transformation profonde de l’origine de l’électricité consommée avec une majorité désormais issue des renouvelables, et une plus grande intégration aux échanges européens.</p> 
+
+<p>Cette configuration rend la série particulièrement pertinente pour une analyse économétrique intégrant ruptures structurelles (2020, 2022), saisonnalité marquée et changement de régime énergétique.</p>
+
+
+# Visualisation des données: 
+
+## Création de la série temporelle:
+
+```{r}
+# Création de l’objet série temporelle ts 
+# R transforme le vecteur Value en série ts mensuelle (frequency = 12).
+# Le start est (année, mois) du premier point.
+start_year <- year(min(elec_DE$Date))
+start_month <- month(min(elec_DE$Date))
+
+elec_ts <- ts(elec_DE$Value,
+              start = c(start_year, start_month),
+              frequency = 12)
+elec_ts
+```
+
+
+## Visualisation de la série temporelle elec_ts:
+
+```{r}
+# Visualisation descriptive 
+# R trace la série pour repérer tendance, saisonnalité et ruptures potentielles.
+plot(elec_ts,
+     main = "Allemagne — Demande mensuelle d'électricité (TWh)",
+     xlab = "Temps",
+     ylab = "TWh")
+
+# R trace les variations mensuelles (différences premières) pour visualiser la stabilité.
+#plot(diff(elec_ts), main = "Allemagne — Variation mensuelle de la demande (Δ en TWh)", xlab = "Temps", ylab = "ΔTWh")
+
+```
+
+<p> Analyse graphique de la demande mensuelle d’électricité en Allemagne. La figure présente l’évolution de la demande mensuelle d’électricité en Allemagne, mesurée en térawattheures (TWh), sur la période janvier 2015 – novembre 2025. L’examen visuel de la série fait apparaître plusieurs caractéristiques importantes. Premièrement, la série présente une saisonnalité annuelle marquée, avec des niveaux systématiquement plus élevés en hiver et plus faibles durant l’été. Ce comportement est cohérent avec la structure de la demande énergétique d’un pays tempéré, où les besoins de chauffage et l’activité industrielle augmentent la consommation durant la période hivernale. Deuxièmement, la série ne semble pas osciller autour d’une moyenne constante. On observe une évolution du niveau moyen de la demande, avec une tendance légèrement décroissante à partir de 2019 et un niveau durablement plus faible après 2020. Par ailleurs, des ruptures structurelles plausibles apparaissent, notamment autour de 2020 avec la pandémie de COVID-19 et à partir de 2022 avec la crise énergétique européenne liée à la guerre en Ukraine. Enfin, l’amplitude des fluctuations saisonnières semble évoluer proportionnellement au niveau de la série, ce qui suggère une saisonnalité multiplicative. L’ensemble de ces éléments justifie l’application de tests de racine unitaire (DF, ADF) ainsi que de tests autorisant des ruptures structurelles (Zivot–Andrews, Lee–Strazicich) afin de déterminer la nature du processus générateur des données. </p>
+
+
+## Chronnograme
+
+```{r}
+plot(decompose(elec_ts,"multiplicative", filter = NULL))
+```
+
+<p>**Composante de tendance**: La tendance estimé révèle 4 phases distinctes. Tout d'abord on observe une légère hausse de 2015 à 2017, qui traduit une augmentation modérée de la demande. Ensuite de fin 2017 à fin 2020, on observe une décroissance progressive, avec un creux marqué à partir de 2020 traduisant certainement le Covid. Par la suite 2021, nous montre une nouvelle augmentation de la demande traduisant une bonne relance post-Covid de l'Allemagne dans la réindustrialisation. Enfin, à partir de 2022, nous avons de nouveau une baisse mais plus sévère cette fois ci. Cela fait réponse à la crise énergétique européenne dû à la guerre entre l'Ukraine et la Russie. Par la suite la tendance arrive à se stabiliser mais à un niveau inférieur. Cela nous montre que la tendance n’est pas linéaire sur toute la période.</p>
+
+<p>**Composante saisonnière**: Elle est strictement périodique, stable dans le temps et son amplitude est approximativement constante. Les pics saisonniers se répètent chaque année avec une structure très similaire. Confirmant la présence d’une saisonnalité annuelle persistante dans la demande d’électricité.</p>
+
+<p>**Composante random**: La composante random fluctue autour de 1 sans tendance ni structure systématique apparente. Elle capte essentiellement des chocs irréguliers de court terme, ce qui suggère que la tendance et la saisonnalité expliquent l’essentiel de la dynamique de la série.</p>
+
+<p> **En conclusion**: La décomposition multiplicative met en évidence une saisonnalité annuelle stable et une tendance marquée par plusieurs inflexions liées à des chocs macroéconomiques. La composante irrégulière reste limitée, ce qui indique que la dynamique de la série est principalement expliquée par la tendance et la saisonnalité. Ces observations justifient l’application de tests de racine unitaire pour déterminer la nature du processus générateur des données. </p>
+
+## Monthplot
+
+```{r}
+monthplot(elec_ts)
+```
+Le monthplot confirme la présence d’une saisonnalité annuelle stable dans la demande d’électricité. Les niveaux moyens sont plus élevés durant les mois d’hiver et plus faibles pendant la période estivale. La répétition régulière de ce schéma d’une année à l’autre confirme la stabilité de la composante saisonnière, déjà mise en évidence par la décomposition de la série au dessus.
+
+
+## Visualisation de la série temporelle désaisonalisée elec_ts12:
+
+```{r}
+elec_ts12 <-diff(elec_ts,12)
+elec_ts12
+plot(elec_ts12)
+```
+La différenciation saisonnière d’ordre 12 entraîne la perte des 12 premières observations, car le calcul $\Delta_{12} y_t = y_t - y_{t-12}$ nécessite l’existence d’une observation un an auparavant. La série transformée commence donc en janvier 2016. La série obtenue fluctue désormais autour de zéro sans tendance claire, ce qui suggère que la composante saisonnière a été correctement retirée. Les fluctuations restantes traduisent principalement des variations conjoncturelles et des chocs ponctuels, notamment autour de 2020–2022 (Covid + Ukraine). Cette transformation permet ainsi de travailler sur une série plus adaptée pour l’application des tests de racine unitaire.
+
+
+# Test de racines unitaires:
+
+## Test de Dickey-Fuller
+
+Ici nous présentons seulement la spécification *none*. Les cas *trend* et *drift* sont en annexe.
+
+Pour la spécification *none*, nous avons l'équation suivante :
+
+$$
+\Delta X_t = (\rho - 1)X_{t-1} + \varepsilon_t
+$$
+
+**Hypothèses :**
+
+$$
+H_0 : (\rho - 1) = 0 \quad \text{versus} \quad H_a : |\rho| < 1
+$$
+
+Si $H_0$ est vraie, alors le processus est **DS**. Si c'est $H_a$, on a un **AR(1) stationnaire**.
+
+```{r}
+summary(ur.df(elec_ts12, type="none", lags=0))
+```
+
+<p> Ici, on est dans la spécification **none** du test de racines unitaires de Dickey-Fuller. Ce qui nous intéresse ici est la "t value" de  ($\rho$-1). Dans la sortie R on trouve cette valeur à l'intersection entre "z.lag.1" et "t value" ou à la ligne "Value of test-statistic is:". Ici on ne prend pas la p_value de "z.lag.1" car elle est fausse du fait que la statistique ne suit pas une loi de Student classique. On compare la "t value" à la valeur critique donnée à l’intersection de la ligne tau1 et de la colonne 5%. Ici donc, t_value de ($\rho$-1) = -4.1969 < -1.95. Par conséquent, on rejette $H_0$ qui nous dit que ($\rho-1$)=0, et donc on accepte H1 qui dit que |$\rho$|<1 . Par conséquent, le processus n'est ni TS, ni DS, on peut donc conclure qu'il est de type AR(1) stationnaire.</p>
+
+
+### Vérification des résultats du test de Dickey-Fuller:
+
+<p>Il faut savoir, que tous les résultats de Dickey-Fuller (DF) sont faux si les aléas de la régression de DF sont auto-corrélés. Pour savoir si c'est le cas, on réalise le correlogramme et le PACF.</p>
+
+```{r}
+plot(ur.df(elec_ts12, type="none", lags=0))
+```
+
+<p>**ACF**: lag(0)=1, ce qui est normal. Le autres lag, jusqu'au 12ème sont compris dans les bornes. En revanche ce dernier, connait un pic négatif marqué. Ce qui traduit une autocorrélation significative à lag(12). Donc sur l'ACF, malgré qu'il n'y es pas de dépendance court terme, on observe un signal à lag(12) typique d'une saisonnalité, ce qui est logique vu que l'on a des données mensuelles. </p>
+
+<p>**PACF**: les lags sont compris entre les bornes et n'affichent donc pas de dépendance court terme, jusqu'au lag(12) avec un gros pic négatif, et même un léger pic positif à lag(13). Un pic net au lag 12 dans le PACF est cohérent avec une composante AR saisonnière (à période 12). Ce qui est cohérent avec nos données mensuelles. </p>
+
+<p>**En conclusion**, même s'il n'y a pas d'autocorrélation sur le court terme (lag(1)...), on en observe une qui est significative sur le lag(12). Les résidus sont donc autocorrélés. Ce qui implique que le Dickey-Fuller simple donne de faux résultats. Il faut donc passer au test de Dickey-Fuller augmenté pour savoir si on a à faire à un processus TS, DS ou stationnaire. </p>
+
+
+## Test de Dickey-Fuller augmenté:
+
+Le **test ADF** est identique au **DF**, auquel on ajoute des variables explicatives en plus qui sont la variable dépendante retardée jusqu'à l'ordre $P$.
+
+L'équation du test ADF avec la spécification *none* est :
+
+$$
+\Delta X_t = (\rho - 1)X_{t-1} + \varepsilon_t + \sum_{p=1}^{P} \gamma_p \Delta X_{t-p}
+$$
+
+Pour ce test, on va tout d'abord calculer le nombre de retard (*lag*). Pour cela, on calcule la valeur maximale de retard à introduire ($p_{\text{max}}$, formule de Schwert) et on minimise par le critère de Ng et Perron (MAIC).
+
+```{r}
+# Calcul du nombre de retard par la méthode du MAIC
+T <- length(elec_ts12)
+pmax <- as.integer(12*(T/100)^(0.25))
+summary(CADFtest(elec_ts12,criterion="MAIC",type="none",max.lag.y=pmax))
+```
+
+<p> **Interprétation**: On regarde la ligne "Max lag of the diff. dependent variable:", qui ici vaut 12 ≠ 0 (sinon on fait le BIC). On va donc refaire le test none, mais cette fois ci avec un lag=12. Ajoutons qu'étant donnée les coefficients $\beta_0$ et $\beta_1$ largement supérieur à 0.05 lors du test **DF**, nous n'avons pas besoin de tester **ADF** avec les spécifications "trend" et "drift".</p>
+
+```{r}
+summary(ur.df(elec_ts12, type="none", lags=12))
+```
+
+**Interprétation**
+
+<u>Significativité des paramètres :</u>
+
+$$
+H_0 : \gamma_{12} = 0 \quad \text{versus} \quad H_a : \gamma_{12} \neq 0
+$$
+
+Ici, la p-value associée à $\gamma_{12}$ est égale à $0.000000000891$. Donc la p-value est largement inférieure au seuil critique de 10 % (on prend $0.1$ pour les $\gamma$ seulement). On rejette donc l'hypothèse $H_0$ selon laquelle $\gamma_{12} = 0$, il est donc significatif (On peut aussi dire que la $t$-value de $\gamma_{12}$ en valeur absolue vaut $6.823 > 1.6$, donc $\gamma_{12}$  est significatif. Donc on garde ce modèle..
+
+<u>Spécification du PGD :</u>
+
+$$
+H_0 : (\rho - 1) = 0 \quad \text{versus} \quad H_a : |\rho| < 1
+$$
+
+Maintenant on regarde la $t$-value de $(\rho - 1)$ qui ici est égale à $-1.7289 > -1.95$. Par conséquent, on ne rejette pas $H_0$ qui nous dit que $(\rho - 1) = 0$, et donc on a $\rho = 1$, donc il y a présence de racine unitaire.
+
+Par conséquent, le processus est **DS** d'après le test ADF.
+
+
+## Test de Zivot et Andrews (1992) :IO: 
+
+Le test de Zivot-Andrews est utilisé pour détecter une racine unitaire en présence d’une rupture structurelle inconnue.
+
+Les hypothèses du test sont les suivantes :
+
+$$
+H_0 : \text{On a DS sans changement structurel}
+$$
+
+$$
+H_a : \text{On a TS avec un unique changement structurel (qui survient à une date déterminée par la procédure de test, notée } T_B \text{)}
+$$
+
+Le test peut également être formulé sous la forme :
+
+$$
+H_0 : \rho = 1 \quad \text{versus} \quad H_a : |\rho| < 1
+$$
+
+via la statistique $t$ qui dépend de la date de rupture.
+
+On commence par la spécification *both* dont l'équation est :
+
+$$
+y_t = \beta_0 + \beta_1 t + \rho y_{t-1} + \delta_1 DU_t(T_B) + \delta_2 DT_t(T_B) + \sum_{j=1}^{p} \gamma_j \Delta y_{t-j} + \varepsilon_t
+$$
+
+avec
+
+$$
+\varepsilon_t \sim i.i.d.(0,\sigma_\varepsilon^2)
+$$
+
+```{r}
+summary(ur.za(elec_ts12, model = "both", lag=12))
+```
+
+Les estimations obtenues indiquent que $\delta_1 = 0.000229$ et $\delta_2 = 0.000412$.  
+Les deux coefficients présentent des $p$-values inférieures à $0.05$, ce qui implique qu’ils sont statistiquement significatifs au seuil de 5 %.
+
+Par ailleurs, le coefficient $\gamma_{12} = 7.53 \times 10^{-9}$ est inférieur à $0.1$, ce qui indique également une significativité statistique au seuil de 10 %.
+
+Nous reprenons alors le test des hypothèses suivant :
+
+$$
+H_0 : \rho = 1
+$$
+
+$$
+H_a : |\rho| < 1
+$$
+
+La statistique de test associée au coefficient $(\rho - 1)$ est donnée par :
+
+$$
+t = -3.6719
+$$
+
+La valeur critique au seuil 5% est :
+
+$$
+-5.08
+$$
+
+Comme
+
+$$
+-3.6719 > -5.08
+$$
+
+nous ne rejetons pas l’hypothèse nulle $H_0$.
+
+Ainsi, nous ne pouvons pas rejeter l’hypothèse selon laquelle :
+
+$$
+\rho = 1
+$$
+
+ce qui indique la présence d’une **racine unitaire** dans la série. Par conséquent, la série suit un processus **Difference Stationary (DS)** sans changement structurel.
+
+### Plot du test ZA:
+
+```{r}
+plot(ur.za(elec_ts12, model = "both", lag=12))
+```
+Le graphique du test de Zivot-Andrews montre que la statistique t minimale (= -3.6719), est atteinte à t=80 ("Potential break point at position: 80" dans le test). Pourtant cela reste au-dessus des valeurs critiques aux seuils de 1 %, 2.5 % et 5 %. Par conséquent, l’hypothèse nulle ne peut pas être rejetée, ce qui confirme notre interprétation ci-dessus.
+
+```{r}
+# évolution de la série elec_ts12 et interprétation du potential break point suggéré par ZA
+plot1 <- plot.ts(elec_ts12,
+        main = "Evolution de la demande d'électricité",
+        ylab = "Consommation (TWh)",
+        xlab = "Année",
+        col = "blue",
+        lwd = 2,
+        las = 1)
+grid()
+abline(v = time(elec_ts12)[80], col = "red")
+as.yearmon(time(elec_ts12))[80]
+```
+Le test Zivot–Andrews nous suggère un break point à t = 80, qui correspond à août 2022. Cela correspond à la période de crise énergétique européenne dûe à l’invasion de l’Ukraine par la Russie, qui a entraîné une forte hausse des prix de l’énergie, des ajustements dans la production industrielle et des modifications dans les comportements de consommation d’électricité en Allemagne.
+
+
+## Test de Lee et Strazicich (2003) : 
+
+Le test de Lee-Strazicich (2003) permet de tester la présence d’une racine unitaire en tenant compte de ruptures structurelles endogènes dans la série, tout en évitant les biais présents dans les tests de racine unitaire avec rupture traditionnels. Vu qu'on était en "both" dans ZA, ici on utilise la spécification "break".
+
+**Hypothèse de RU**
+
+$$
+H_0 : \text{DS avec 1 (ou 2) date de rupture}
+$$
+
+$$
+H_a : \text{TS avec 1 (ou 2) date de rupture}
+$$
+
+Équation du modèle *break* :
+
+Sous $H_0$ :
+
+$$
+y_t = \mu_0 + d_1 B_{1t} + d_2 B_{2t} + d_3 D_{1t} + d_4 D_{2t} + y_{t-1} + v_{1t}
+$$
+
+Sous $H_a$ :
+
+$$
+y_t = \mu_1 + \gamma \, trend_t + d_1 D_{1t} + d_2 D_{2t} + d_3 DT_{1t} + d_4 DT_{2t} + v_{2t}
+$$
+Pour le test de Lee-Strazicich, le nombre de retards n’a pas été fixé à 12 comme dans les tests ADF et Zivot-Andrews car cela ne fonctionne pas. Nous choisissons donc le lag le plus élevé depuis 12 pour lequel le test LS fonctionne (ici 11). Avec une sélection de type general-to-specific au seuil de 10 %.
+
+```{r}
+source("R/LeeStrazicichUnitRootTest.R")
+myBreaks <- 1
+myModel <- "break"
+myLags <- 11
+myLS_test <- ur.ls(y=elec_ts12 , model = myModel, breaks = myBreaks, lags = myLags, method = "GTOS", pn = 0.10, print.results = "print" )
+```
+La statistique du test est égale à $-5.566986$. Le test identifie un point de rupture correspondant à $\lambda = 0.8$, soit $TB = 99$. 
+Au seuil de significativité de 5 %, la valeur critique associée au $\lambda$ le plus proche de $0.8$ est $-4.51$. Comme $-5.566986 < -4.51$, l’hypothèse nulle $H_0$ d'un PGD **DS** avec une rupture structurelle est rejetée. On examine alors la significativité du coefficient $\beta_1$ dans la régression du test de Zivot–Andrews pour poursuivre l'interprétation.
+
+```{r}
+summary(ur.za(elec_ts12, model = "both", lag=12))
+```
+
+Ici, le coefficient $\beta_1$ n’est pas significatif puisque la $p$-value est égale à $0.297333 > 0.05$. Le processus ne peut donc pas être de type **TS**. La série peut ainsi être considérée comme **stationnaire**.
+
+Dans la suite de l’analyse, le test avec **une seule rupture** est retenu car il est généralement **plus puissant et plus robuste** que la version autorisant deux ruptures. Néanmoins, le test avec **deux ruptures structurelles** est également réalisé et présenté en **annexe** à titre de vérification.
+
+Par ailleurs, la version **bootstrap** du test de Lee–Strazicich n’est pas utilisée dans notre cas, car notre série transformée $\texttt{elec\_ts12}$ contient **plus de 35 observations**.
+
+
+```{r}
+as.yearmon(time(elec_ts12))[99]
+
+plot1 <- plot.ts(elec_ts12,
+        main = "Evolution de la demande d'électricité",
+        ylab = "Consommation (TWh)",
+        xlab = "Année",
+        col = "blue",
+        lwd = 2,
+        las = 1)
+grid()
+abline(v = time(elec_ts12)[99], col = "red")
+```
+
+La rupture structurelle identifiée autour de **mars 2024** peut être associée au contexte de ralentissement de l’activité industrielle en Allemagne. En effet, la demande d’électricité industrielle est restée inférieure à ses niveaux d’avant la crise énergétique, notamment en raison des coûts élevés de l’énergie et du recul de la production industrielle.
+
+Par ailleurs, le système énergétique allemand connaît depuis 2023–2024 d’importantes transformations structurelles, liées notamment à la montée rapide des énergies renouvelables et aux ajustements du marché électrique après la sortie complète du nucléaire en 2023. Ces évolutions peuvent modifier durablement les comportements de production et de consommation d’électricité.
+
+Il convient toutefois de noter que d’autres chocs structurels ont également affecté la demande d’électricité (Ukraine, Covid) sur la période étudiée. Les dates de rupture identifiées correspondent donc aux informations fournies par le test de Lee–Strazicich.
+
+
+## Conclusion sur les tests de racine unitaire
+
+L’analyse de stationnarité de la série a été réalisée à l’aide de plusieurs tests de racine unitaire afin d’obtenir un diagnostic robuste du processus générateur de données (PGD).
+
+Dans un premier temps, le test de Dickey-Fuller simple, estimé sous la spécification *none*, suggère un PGD de type AR(1) stationnaire. Ce résultat indique que la série pourrait fluctuer autour d’une moyenne constante sans racine unitaire.
+
+Cependant, afin de tenir compte d’une possible autocorrélation des résidus, un test de Dickey-Fuller augmenté (ADF) a ensuite été réalisé avec 12 retards (jusqu’à $\gamma_{12}$). Les résultats de ce test conduisent à ne pas rejeter l’hypothèse de racine unitaire, ce qui suggère que la série suit plutôt un processus *difference-stationary* (DS).
+
+Pour approfondir l’analyse et prendre en compte la possibilité d’une rupture structurelle, le test de Zivot-Andrews (ZA) a été estimé avec la spécification *both* et 12 retards. Les résultats indiquent également un processus DS sans changement structurelle, bien qu’un point de rupture potentiel soit identifié autour de l’observation 80.
+
+Enfin, le test de Lee-Strazicich (LS), qui permet de tester la racine unitaire en présence de rupture(s) structurelle(s), a été appliqué avec la spécification *break* et 11 retards (MyLags). Contrairement aux résultats précédents, ce test suggère que la série est stationnaire, avec un point de rupture potentiel localisé autour de l’observation 99.
+
+Dans l’ensemble, les résultats apparaissent donc partiellement divergents selon la spécification et la prise en compte des ruptures structurelles. Les tests traditionnels (ADF et ZA) indiquent plutôt la présence d’une racine unitaire et donc un processus DS, tandis que le test LS suggère une stationnarité conditionnelle à une rupture structurelle. Conformément aux recommandations méthodologiques du cours, nous retenons le PGD issu du test de Lee et Strazicich (2003). Ainsi, nous considérons que la série suit un processus stationnaire.
+
+
+# Modélisation
+
+## Autocorrélation de la série stationnaire elec_ts12:
+
+```{r}
+acf(elec_ts12)
+pacf(elec_ts12)
+```
+
+L’analyse conjointe de l’ACF et du PACF de la série *elec_ts12* met en évidence la présence d’autocorrélations significatives, notamment aux premiers retards. L’ACF présente une décroissance progressive, tandis que le PACF montre un pic marqué au premier lag, suggérant une dépendance temporelle persistante.
+
+Ces éléments indiquent que la série n’est pas un bruit blanc.
+
+Testons cette autocorrélation à l’aide du test de Ljung-Box.
+
+Les hypothèses sont les suivantes :
+
+$H_0 : \rho_1 = \rho_2 = \dots = \rho_m = 0$  
+Toutes les autocorrélations jusqu’au retard $m$ sont nulles.
+
+$H_a : \exists \, k \in \{1, \dots, m\} \text{ tel que } \rho_k \neq 0$  
+Il existe au moins une autocorrélation non nulle parmi les $m$ premiers retards.
+
+Il est donc nécessaire de modéliser la série à l’aide d’un modèle de type ARMA(p,q), afin de capturer cette dynamique.
+
+```{r}
+Box.test(elec_ts12,lag=13,type = "Ljung-Box")
+```
+
+La p-value étant inférieure à 5 %, nous rejetons l’hypothèse nulle $H_0$. Il existe donc une autocorrélation significative dans la série, ce qui confirme les observations issues des fonctions ACF et PACF.
+
+Il est dès lors nécessaire de modéliser la série à l’aide d’un modèle de type ARMA$(p,q)$ afin de capturer cette dynamique.
+
+Afin de déterminer les ordres optimaux $(p,q)$ du modèle, nous utilisons la fonction d’autocorrélation étendue (EACF).
+
+## Modèle I
+
+Le modèle I correspond à la spécification initiale suggérée par la matrice de l’EACF. Les résultats détaillés des diagnostics associés à ce modèle sont présentés en annexe. Toutefois, les tests mettent en évidence la présence d’effets d’hétéroscédasticité conditionnelle (clusters de volatilité), indiquant que les aléas ne peuvent pas être assimilés à un bruit blanc.
+
+Nous avons donc envisagé une nouvelle spécification, le modèle II, afin d’obtenir des aléas assimilables à un bruit blanc et ainsi améliorer la qualité de la modélisation.
+
+
+## Modèle II
+
+### Choix du modèle
+
+```{r}
+eacf(elec_ts12)
+```
+Dans la matrice de l’EACF, on observe également un point situé en haut à gauche d’une zone triangulaire sans croix, correspondant à une spécification avec $p = 4$ et $q = 12$, soit un modèle ARMA$(4,12)$. Nous proposons donc d’estimer ce modèle.
+
+Cette nouvelle spécification est envisagée afin d’améliorer les propriétés des résidus, en particulier pour obtenir un comportement plus proche d’un bruit blanc, ce qui n’était pas entièrement vérifié avec le modèle précédent (hétéroscédasticité).
+
+### Significativité des coefficients
+
+Nous évaluons à présent la significativité des coefficients du modèle estimé.
+
+```{r}
+reg <- Arima(elec_ts12, order = c(4,0,12))
+coeftest(reg)
+```
+
+La constante étant statistiquement significative, elle est maintenue dans le modèle. Les coefficients non significatifs sont ensuite éliminés de manière itérative afin d’aboutir à une spécification plus parcimonieuse.
+
+```{r}
+reg <- Arima(elec_ts12, order = c(4,0,12), include.mean = TRUE, 
+             fixed = c(NA,0,0,0,0,0,0,0,0,0,0,0,0,0,0,NA,NA))
+coeftest(reg)
+```
+Après plusieurs itérations (voir détail en annexe), nous aboutissons à un modèle ARMA$(4,12)$ simplifié, dans lequel seuls la constante, le coefficient $\phi_1$ associé au terme AR(1) et le coefficient $\theta_{12}$ associé au terme MA(12) sont significatifs.
+
+Le modèle retenu s’écrit alors :
+
+$$
+X_t = \mu + \phi_1 X_{t-1} + \theta_{12} \varepsilon_{t-12} + \varepsilon_t
+$$
+
+où $\varepsilon_t$ désigne est censé désigner un bruit blanc, il faut donc le vérifier.
+
+Or, les aléas du modèle étant inobservables, nous analysons les résidus estimés afin de vérifier s’ils peuvent être assimilés à un bruit blanc.
+
+Pour cela, nous testons successivement :
+
+- l’absence d’autocorrélation (test de Ljung-Box) ;
+
+- la nullité de l’espérance (test de Student) ;
+
+- l’homoscédasticité (test d’Engle);
+
+- s'ils suivent une loi Normal et donc bruit blanc Gaussien (test de Jarque Bera).
+
+Si ces hypothèses ne sont pas rejetées, les résidus sont compatibles avec un bruit blanc, ce qui permet d’en déduire que les aléas du modèle sont bien spécifiés comme bruit blanc, et donc que le modèle capte toutes l'information.
+
+### Autocorrélation des résidus
+
+Nous examinons à présent si ce modèle permet de capter correctement l’autocorrélation de la série, en analysant les résidus du modèle.
+
+```{r}
+res=(reg$res-mean(reg$res))/sd(reg$res) # On centre et réduit les résidus
+pacf(res)
+```
+
+Le PACF des résidus ne présente aucun dépassement significatif des bandes de confiance, ce qui suggère l’absence d’autocorrélation résiduelle.
+
+Afin de confirmer ce résultat, nous recourons au test de Ljung-Box, dont les hypothèses ont été définies précédemment.
+
+```{r}
+Box.test(res,lag=16,type = "Ljung-Box") #on prend 16 car léger pic à 16
+```
+La p-value étant égale à 0,5973 (supérieure à 5 %), nous ne rejetons pas l’hypothèse nulle $H_0$. Les autocorrélations sont donc nulles jusqu’au retard $m$, ce qui indique que les résidus ne présentent pas d’autocorrélation.
+
+Le modèle capture ainsi correctement la dynamique de dépendance de la série.
+
+### Test de Student
+
+Nous testons si l’espérance des résidus est nulle, conformément à l’hypothèse selon laquelle un bruit blanc est de moyenne nulle.
+
+Les hypothèses sont les suivantes :
+
+$H_0 : \mathbb{E}(\varepsilon_t) = 0$  
+$H_a : \mathbb{E}(\varepsilon_t) \neq 0$
+
+```{r}
+t.test(res)
+```
+La p-value étant égale à 1 (supérieure à 5 %), nous ne rejetons pas l’hypothèse nulle $H_0$. L’espérance des résidus peut donc être considérée comme nulle.
+
+### Test d’Engle
+
+Nous appliquons à présent le test ARCH-LM pour différents retards, de 1 à 30.
+
+Les hypothèses sont les suivantes :
+
+$H_0$ : homoscédasticité conditionnelle des résidus  
+$H_a$ : hétéroscédasticité conditionnelle des résidus
+
+```{r}
+K <- 30
+temp <- rep(0,K)
+for(i in 1:K) {
+  temp[i] <- ArchTest(res, lag = i)$p.value
+}
+temp
+```
+
+Dans le test d’Engle, aucune des p-values n’est inférieure à 5 %. Nous ne rejetons donc pas l’hypothèse nulle $H_0$, ce qui indique une homoscédasticité des résidus.
+
+Les résidus peuvent ainsi être assimilés à un bruit blanc, ce qui permet de valider l’hypothèse selon laquelle les aléas du modèle constituent un bruit blanc. Le modèle semble donc capter correctement l’information contenue dans la série.
+
+Nous vérifions à présent la normalité des aléas afin de compléter les diagnostics et d’évaluer la validité des intervalles de confiance des prévisions.
+
+### Test de Jarque-Bera
+
+Nous testons la normalité des résidus à l’aide du test de Jarque-Bera.
+
+Les hypothèses sont les suivantes :
+
+$H_0 : \varepsilon_t \sim \mathcal{N}(0, \sigma^2)$  
+Les résidus suivent une loi normale et l'intervalle de confiance de la prévision sera correcte.
+
+$H_a : \varepsilon_t \not\sim \mathcal{N}(0, \sigma^2)$  
+Les résidus ne suivent pas une loi normale et l'intervalle de confiance de la prévision sera incorrecte.
+
+```{r}
+reg <- Arima(elec_ts12, order = c(4,0,12), include.mean = TRUE, 
+             fixed = c(NA,0,0,0,0,0,0,0,0,0,0,0,0,0,0,NA,NA)) # pour jarque bera il faut que nos résidus ne soient pas centré réduit
+jarque.bera.test(reg$res)
+```
+La p-value étant égale à 0,252 (supérieure à 5 %), nous ne rejetons pas l’hypothèse nulle de normalité. Les aléas peuvent donc être considérés comme suivant une loi normale :
+
+$$
+\varepsilon_t \sim \mathcal{N}(0, \sigma^2)
+$$
+
+Ainsi, les aléas peuvent être assimilés à un bruit blanc gaussien. Dans ce cadre, les intervalles de confiance des prévisions sont valides.
+
+### Prévision de la série désaisonnalisée
+
+```{r}
+# Prévision sur 6 mois
+prev <- forecast(reg, h = 6, level = 0.95)
+
+# Affichage graphique
+plot(prev, main = "Prévision sur 6 mois - ARMA(0,12) (IC 95%)")
+
+# Affichage des valeurs numériques
+print(prev)
+```
+
+**Analyse: ** Les prévisions issues du modèle ARMA(0,12) appliqué à la série désaisonnalisée mettent en évidence une dynamique globalement centrée autour de zéro, ce qui est cohérent avec le fait que la composante saisonnière a été retirée au préalable.
+
+Les valeurs prévues présentent une décroissance progressive sur l’horizon de prévision : après une valeur relativement élevée en décembre 2025 (environ 4,01), les prévisions diminuent progressivement pour atteindre un niveau proche de zéro en mai 2026 (environ 0,18). Cette évolution suggère un retour vers la moyenne de la série désaisonnalisée, caractéristique classique des modèles ARMA stationnaires.
+
+Les intervalles de confiance à 95% s’élargissent à mesure que l’horizon augmente, traduisant une incertitude croissante. On observe également que les bornes inférieures deviennent négatives à partir de février 2026, ce qui reflète la variabilité résiduelle de la série.
+
+D’un point de vue économique et statistique, ces prévisions indiquent que, une fois la saisonnalité retirée, la série ne présente pas de tendance persistante et évolue principalement sous l’effet de fluctuations aléatoires autour de sa moyenne. Le modèle ARMA(0,12) capture donc correctement la dynamique de court terme, mais ne produit pas de structure prédictive forte à moyen terme.
+
+
+# Intégration de la saisonnalité
+
+Le modèle initialement identifié est un ARMA$(4,0,12)$. Afin de prendre en compte la saisonnalité de la série, nous étendons ce modèle à un cadre saisonnier de type SARMA$(4,0,12)(P,D,Q)_{s=12}$.
+
+Il reste alors à déterminer les paramètres saisonniers $(P,D,Q)$ associés à la dynamique de la série.
+
+## Choix de $D$
+
+Nous commençons par identifier l’ordre de différenciation saisonnière $D$.
+
+```{r}
+Acf(elec_ts,lag.max=120)
+```
+
+On se focalise sur les termes de retard qui sont multiples de 12. On remarque que les significativités des autocorrélations avec ces termes ne tendent pas rapidement vers 0 (seulement à partir du 60ème terme de retard, soit plus que 4x12).
+
+Donc on en conclut que $D$ = 1.
+
+
+## Modélisation de la série
+
+Modélisons la série brute. On repart de notre modèle $ARMA_{(4,0,12)}$ en y intégrant une partie saisonnière. On commence par tester un modèle $SARIMA_{(4,0,12)(1,1,1)s=12}$. Plusieurs modèles SARIMA ont été testés (cf annexe) afin de prolonger le modèle obtenu sur la série désaisonnalisée. Certaines spécifications ont été écartées en raison de coefficients non significatifs ou de problèmes d’identifiabilité. Par ailleurs, tous les modèles testés présentent une hétéroscédasticité résiduelle au sens du test d’Engle, ce qui indique la présence de clusters de volatilité. En théorie, cela appellerait une modélisation complémentaire de type ARCH/GARCH, mais cette extension sort du cadre du projet. Le choix du modèle final a donc été effectué sur la base de la dynamique de moyenne uniquement. Le modèle retenu, comportant AR(1), SAR(2) et SMA(1) (capture la même informations que MA12, mais est préféré), est celui qui offre le meilleur compromis entre parcimonie, significativité des coefficients, stabilité de l’estimation et prise en compte de la dépendance saisonnière. On a donc l'équation suivante pour notre modèle : 
+
+$$
+X_t = \phi_1 X_{t-1} + \Phi_1 X_{t-12} + \Phi_2 X_{t-24}
+- \phi_1 \Phi_1 X_{t-13} - \phi_1 \Phi_2 X_{t-25}
++ \varepsilon_t + \Theta_1 \varepsilon_{t-12}
+$$
+
+```{r}
+reg2 <- Arima(elec_ts, order = c(4,0,12), include.mean = TRUE,
+              fixed = c(NA,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,NA,NA),
+              seasonal = list(order = c(2,1,1), period = 12))
+coeftest(reg2)
+```
+
+## Autocorrélation des résidus
+
+```{r}
+res2=(reg2$res-mean(reg2$res))/sd(reg2$res) # On centre et réduit les résidus
+pacf(res2)
+```
+
+Le PACF des résidus met en évidence un léger dépassement des bandes de confiance au retard 14 Afin de vérifier si cette autocorrélation est statistiquement significative, nous recourons au test de Ljung-Box, dont les hypothèses ont été définies précédemment.
+
+```{r}
+Box.test(res2,lag=14,type = "Ljung-Box")
+```
+
+Bien qu’un pic isolé apparaisse dans le PACF des résidus, celui-ci ne s’accompagne pas d’une structure persistante. Le test de Ljung-Box, où l'on ne rejette pas $H_0$,  (0.4551 > 0.05), confirme l’absence d’autocorrélation globale. En conséquence, ce signal est attribué à des fluctuations aléatoires et ne justifie pas une re-spécification du modèle.
+
+
+## Test de Student
+
+Nous testons si l’espérance des résidus est nulle, conformément à l’hypothèse selon laquelle un bruit blanc est de moyenne nulle. Les hypothèses du test on été définies précédemment.
+
+```{r}
+t.test(res2)
+```
+
+La p-value étant égale à 1 (supérieure à 5 %), nous ne rejetons pas l’hypothèse nulle $H_0$. L’espérance des résidus peut donc être considérée comme nulle.
+
+
+## Test d’Engle
+
+Nous appliquons à présent le test ARCH-LM pour différents retards, de 1 à 30. Les hypothèses ont aussi été définies précédemment.
+
+```{r}
+K <- 30
+temp <- rep(0,K)
+for(i in 1:K) {
+  temp[i] <- ArchTest(res2, lag = i)$p.value
+}
+temp
+```
+
+Comme dit au début de cette partie, nous avons ici les 3 premières p_val inférieure à 5%. Nous devons alors rejetter $H_0$ et valider l'hétéroscédasticité des résidus et par conséquent la présence de cluster de volatilité.
+
+
+## Test de Jarque-Bera
+
+Enfin, testons la normalité des résidus à l’aide du test de Jarque-Bera dont les hypothèses ont aussi été définies précédemment.
+
+```{r}
+reg2 <- Arima(elec_ts, order = c(4,0,12), include.mean = TRUE,
+              fixed = c(NA,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,NA,NA),
+              seasonal = list(order = c(2,1,1), period = 12))
+jarque.bera.test(reg2$res)
+```
+
+La p-value étant égale à 0.4954 (supérieure à 5 %), nous ne rejetons pas l’hypothèse nulle de normalité. Les résidus peuvent donc être considérés comme suivant une loi normale de moyenne nulle.
+
+Toutefois, le test d’Engle ayant mis en évidence une hétéroscédasticité conditionnelle, la variance des résidus n’est pas constante.
+
+
+## Prévision de la série avec saisonnalité
+
+```{r}
+# Prévision sur 6 mois
+prev <- forecast(reg2, h = 6, level = 0.95)
+
+# Affichage graphique
+plot(prev, main = "Prévision sur 6 mois - SARIMA_{(4,0,12)(2,1,1)s=12} (IC 95%)")
+
+# Affichage des valeurs numériques
+print(prev)
+```
+
+**Analyse:** Les prévisions issues du modèle SARIMA(4,0,12)(2,1,1)_{12}, estimé sur la série brute, mettent en évidence une évolution stable de la série, dominée par une structure saisonnière marquée.
+
+Les valeurs prévues oscillent entre environ 42 et 49 sur l’horizon de six mois, avec un pic en janvier 2026, suivi d’une diminution progressive jusqu’au mois de mai 2026. Cette dynamique reflète la persistance de la saisonnalité observée dans les données historiques.
+
+Le modèle reproduit correctement la structure saisonnière et la dépendance de court terme, ce qui rend les prévisions cohérentes avec les observations passées. Les intervalles de confiance à 95% s’élargissent progressivement, traduisant une incertitude croissante à mesure que l’horizon augmente.
+
+Cependant, l’analyse des résidus révèle la présence d’hétéroscédasticité conditionnelle, ce qui implique que les aléas ne constituent pas un bruit blanc. Cela signifie que le modèle ne capture pas entièrement la dynamique de la série, en particulier en ce qui concerne la variance.
+
+En conséquence, bien que le modèle SARIMA soit pertinent pour décrire la moyenne conditionnelle et la saisonnalité, les prévisions doivent être interprétées avec prudence, car une partie de l’information, liée à la structure de volatilité, n’est pas modélisée.
+
+
+# Conclusion
+
+Ce projet a permis de mettre en œuvre une démarche complète de modélisation de séries temporelles, depuis l’analyse exploratoire jusqu’à la production de prévisions. L’étude de la série a d’abord mis en évidence la présence d’une structure saisonnière marquée, justifiant le recours à des modèles de type SARIMA.
+
+Une première étape de désaisonnalisation a permis d’identifier une dynamique de court terme à l’aide d’un modèle ARMA(0,12). Ce modèle s’est révélé statistiquement satisfaisant, les résidus se comportant comme un bruit blanc, ce qui indique que la composante non saisonnière de la série est correctement capturée.
+
+Dans un second temps, plusieurs modèles SARIMA ont été estimés afin de modéliser directement la série brute en intégrant la saisonnalité. Certaines spécifications ont été écartées en raison de problèmes d’identifiabilité ou de non-significativité des coefficients. Le modèle retenu, de type SARIMA(4,0,12)(2,1,1)_{12}, permet de reproduire de manière satisfaisante la dynamique de la moyenne conditionnelle et la structure saisonnière de la série.
+
+Cependant, l’analyse des résidus de ce modèle met en évidence une hétéroscédasticité conditionnelle, traduisant la présence de clusters de volatilité. Les aléas ne constituent donc pas un bruit blanc, ce qui indique que le modèle ne capture pas entièrement la dynamique de la série, en particulier en ce qui concerne la variance. Bien qu’une modélisation de type ARCH ou GARCH aurait permis de corriger ce défaut, cette extension ne relevait pas du cadre du projet.
+
+Le choix du modèle final repose ainsi sur un compromis entre qualité statistique et pertinence pratique : le modèle ARMA est mieux spécifié du point de vue des résidus, tandis que le modèle SARIMA est plus adapté à la prévision en niveau, en intégrant explicitement la saisonnalité.
+
+Les prévisions obtenues suggèrent une évolution stable de la série à court terme, dominée par des fluctuations saisonnières, sans tendance marquée. Elles doivent toutefois être interprétées avec prudence en raison des limites liées à la non-modélisation de la variance.
+
+En conclusion, ce travail met en évidence l’importance de considérer à la fois la dynamique de la moyenne et celle de la variance dans la modélisation des séries temporelles, ainsi que la nécessité de faire des compromis méthodologiques en fonction du cadre de l’étude.
+
+
+# Annexe 
+
+## Test de Dickey-Fuller
+
+### Spécification "trend":
+
+La spécification *trend* consiste à estimer par les MCO l'équation suivante :
+
+$$
+\Delta X_t = (\rho - 1)X_{t-1} + \beta_0 + \beta_1 \, tendance_t + \varepsilon_t
+$$
+
+**Hypothèses :**
+
+$$
+H_0 : \beta_1 = 0 \quad \text{versus} \quad H_a : \beta_1 \neq 0
+$$
+
+Si $\beta_1$ est significatif, alors on teste les hypothèses suivantes :
+
+$$
+H_0 : (\rho - 1) = 0 \quad \text{versus} \quad H_a : |\rho| < 1
+$$
+
+La spécification *trend* est la seule qui permet un processus **TS**.
+
+```{r}
+summary(ur.df(elec_ts12, type="trend", lags=0))
+```
+
+<p> Ici, on est dans la spécification **trend** du test de racines unitaires de Dickey-Fuller. Ce qui nous intéresse ici est la p_value de $\beta_1$. Dans la sortie R on trouve cette valeur à l'intersection entre "tt" et "Pr(>|t|)". On compare cette valeur à 0.05 qui correspond à notre seuil de 5%. Ici donc, p_val de $\beta_1$ = 0.755 > 0.05. Par conséquent, on accepte $H_0$ qui nous dit que $\beta_1$ n'est pas significatif. Le processus ne peut donc pas être TS. Maintenant pour savoir si il est DS ou stationnaire, on passe à la spécification **drift**. </p> 
+
+
+### Spécification "drift":
+
+Voici l'équation de la spécification *drift* :
+
+$$
+\Delta X_t = (\rho - 1)X_{t-1} + \beta_0 + \varepsilon_t
+$$
+
+**Hypothèses :**
+
+$$
+H_0 : \beta_0 = 0 \quad \text{versus} \quad H_a : \beta_0 \neq 0
+$$
+
+Si $\beta_0 \neq 0$, c'est-à-dire si $\beta_0$ est significatif, on teste les hypothèses suivantes :
+
+$$
+H_0 : (\rho - 1) = 0 \quad \text{versus} \quad H_a : |\rho| < 1
+$$
+
+Si $H_0$ est vraie, le processus est **DS**, et si c'est $H_a$, le processus est un **AR(1) stationnaire**.
+
+```{r}
+summary(ur.df(elec_ts12, type="drift", lags=0))
+```
+
+<p> Ici, on est dans la spécification **drift** du test de racines unitaires de Dickey-Fuller. Ce qui nous intéresse ici est la p_value de $\beta_0$. Dans la sortie R on trouve cette valeur à l'intersection entre "(Intercept)" et "Pr(>|t|)". On compare cette valeur à 0.05 qui correspond à notre seuil de 5%. Ici donc, p_val de $\beta_0$ = 0.527 > 0.05. Par conséquent, on accepte $H_0$ qui nous dit que $\beta_0$ n'est pas significatif. Maintenant pour savoir si il est DS ou stationnaire, on passe à la spécification **none** </p>
+
+
+## Test de Lee et Strazicich (2003) :
+
+```{r}
+source("R/LeeStrazicichUnitRootTest.R")
+myBreaks <- 2
+myModel <- "break"
+myLags <- 11
+myLS_test <- ur.ls(y=elec_ts12 , model = myModel, breaks = myBreaks, lags = myLags, method = "GTOS", pn = 0.10, print.results = "print" )
+```
+
+La statistique du test est égale à $-5.306362$. Les ruptures structurelles estimées correspondent à $\lambda_1 = 0.4$ avec $TB_1 = 49$ et $\lambda_2 = 0.9$ avec $TB_2 = 104$.
+
+Au seuil de 5 %, on retient la valeur critique correspondant à l’intersection entre un premier point de rupture à $0.4$ et un second à $0.8$ (c'est le plus proche de 0.9), soit $-5.65$. Comme $-7.219606 < -5.65$, l’hypothèse nulle $H_0$ est rejetée, ce qui signifie que le processus n’est pas de type **DS**.
+
+On examine alors la significativité du coefficient $\beta_1$ dans le test de Zivot–Andrews. Celui-ci n’étant pas significatif ($p$-value $= 0.297333 > 0.05$), le processus ne peut pas être de type **TS** non plus. La série est donc **stationnaire**.
+
+```{r}
+as.yearmon(time(elec_ts12))[49]
+as.yearmon(time(elec_ts12))[104]
+
+plot1 <- plot.ts(elec_ts12,
+        main = "Evolution de la demande d'électricité",
+        ylab = "Consommation (TWh)",
+        xlab = "Année",
+        col = "blue",
+        lwd = 2,
+        las = 1)
+grid()
+abline(v = time(elec_ts12)[49], col = "red")
+abline(v = time(elec_ts12)[104], col = "red")
+```
+
+
+## Modèlisation
+
+### Modèle I
+
+#### Choix du modèle
+
+```{r}
+eacf(elec_ts12)
+```
+
+Grâce à la matrice de l’EACF, il est possible d’identifier les ordres initiaux du modèle. Pour cela, on repère la zone triangulaire de zéros et on considère son sommet en haut à gauche. Dans notre cas, celui-ci correspond à $p = 0$ et $q = 12$, ce qui suggère un modèle ARMA$(0,12)$.
+
+
+#### Significativité des coefficients
+
+Nous évaluons à présent la significativité des coefficients du modèle estimé.
+
+```{r}
+reg <- Arima(elec_ts12, order = c(0,0,12))
+coeftest(reg)
+```
+
+Les coefficients associés aux paramètres $\theta_9$ et $\theta_{12}$ ne sont pas significatifs, contrairement aux autres coefficients du modèle.
+
+Afin d’affiner la spécification, nous supprimons dans un premier temps la constante, qui n’est pas significative, puis le coefficient présentant la p-value la plus élevée, à savoir $\theta_{12}$. Nous poursuivons ensuite cette démarche de manière itérative en éliminant les coefficients non significatifs, jusqu’à obtenir un modèle ne comportant que des paramètres statistiquement significatifs.
+
+```{r}
+reg <- Arima(elec_ts12, order = c(0,0,12), include.mean = FALSE, 
+             fixed = c(NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,0))
+coeftest(reg)
+```
+
+Après avoir retiré la constante $\mu$ et le coefficient $\theta_{12}$, tous les paramètres restants sont statistiquement significatifs. Nous retenons donc un modèle MA$(12)$ contraint, sans le coefficient $\theta_{12}$, dont l’expression est la suivante :
+
+$$
+X_t = \theta_1 \varepsilon_{t-1} + \theta_2 \varepsilon_{t-2} + \dots + \theta_{11} \varepsilon_{t-11} + \varepsilon_t 
+$$
+
+où $\varepsilon_t$ désigne est censé désigner un bruit blanc, il faut donc le vérifier.
+
+Or, les aléas du modèle étant inobservables, nous analysons les résidus estimés afin de vérifier s’ils peuvent être assimilés à un bruit blanc.
+
+Pour cela, nous testons successivement :
+
+- l’absence d’autocorrélation (test de Ljung-Box) ;
+
+- la nullité de l’espérance (test de Student) ;
+
+- l’homoscédasticité (test d’Engle);
+
+- s'ils suivent une loi Normal et donc bruit blanc Gaussien (test de Jarque Bera).
+
+Si ces hypothèses ne sont pas rejetées, les résidus sont compatibles avec un bruit blanc, ce qui permet d’en déduire que les aléas du modèle sont bien spécifiés comme bruit blanc, et donc que le modèle capte toutes l'information.
+
+
+#### Autocorrélation des résidus
+
+Nous examinons à présent si ce modèle permet de capter correctement l’autocorrélation de la série, en analysant les résidus du modèle.
+
+```{r}
+res=(reg$res-mean(reg$res))/sd(reg$res) # On centre et réduit les résidus
+pacf(res)
+```
+
+Le PACF des résidus met en évidence un léger dépassement des bandes de confiance au retard 12. Afin de vérifier si cette autocorrélation est statistiquement significative, nous recourons au test de Ljung-Box, dont les hypothèses ont été définies précédemment.
+
+```{r}
+Box.test(res,lag=12,type = "Ljung-Box")
+```
+
+Bien qu’un pic isolé apparaisse dans le PACF des résidus, celui-ci ne s’accompagne pas d’une structure persistante. Le test de Ljung-Box, où l'on ne rejette pas $H_0$,  (0.7921 > 0.05), confirme l’absence d’autocorrélation globale. En conséquence, ce signal est attribué à des fluctuations aléatoires et ne justifie pas une re-spécification du modèle.
+
+
+#### Test de Student
+
+Nous testons si l’espérance des résidus est nulle, conformément à l’hypothèse selon laquelle un bruit blanc est de moyenne nulle. Les hypothèses ont déjà été définies.
+
+```{r}
+t.test(res)
+```
+
+La p-value étant égale à 1 (supérieure à 5 %), nous ne rejetons pas l’hypothèse nulle $H_0$. L’espérance des résidus peut donc être considérée comme nulle.
+
+
+#### Test d’Engle
+
+Nous appliquons à présent le test ARCH-LM pour différents retards, de 1 à 30. Les hypothèses ont déjà été définies.
+
+```{r}
+K <- 30
+temp <- rep(0,K)
+for(i in 1:K) {
+  temp[i] <- ArchTest(res, lag = i)$p.value
+}
+temp
+```
+
+Les deux premières p-values étant inférieures à 5 %, nous rejetons l’hypothèse nulle $H_0$. Il existe donc des effets d’hétéroscédasticité conditionnelle, traduisant la présence de clusters de volatilité. Dans le cadre de ce projet, ces effets ne sont pas modélisés.
+
+Les diagnostics résiduels indiquent que, si le modèle capture correctement la dynamique de la moyenne (absence d’autocorrélation), il ne modélise pas la dynamique de la variance, comme en témoigne la significativité du test d’Engle. La présence d’effets ARCH suggère que les résidus ne sont pas indépendants en variance, ce qui limite la capacité explicative complète du modèle. Une modélisation conjointe de la moyenne et de la variance (de type GARCH) serait nécessaire pour obtenir une spécification plus adéquate.
+
+
+#### Test de Jarque-Bera
+
+Nous testons la normalité des résidus à l’aide du test de Jarque-Bera. Les hypothèses ont déjà été définies.
+
+```{r}
+reg <- Arima(elec_ts12, order = c(0,0,12), include.mean = FALSE, 
+             fixed = c(NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,0)) # on ne fait pas jarque bera sur res centrés réduits
+jarque.bera.test(reg$res)
+```
+
+La p-value étant égale à 0,41 (supérieure à 5 %), nous ne rejetons pas l’hypothèse nulle de normalité. Les résidus peuvent donc être considérés comme suivant une loi normale de moyenne nulle.
+
+Toutefois, le test d’Engle ayant mis en évidence une hétéroscédasticité conditionnelle, la variance des résidus n’est pas constante.
+
+
+#### Prévision de la série désaisonnalisée avec le modèle I
+
+```{r}
+# Prévision sur 6 mois
+prev <- forecast(reg, h = 6, level = 0.95)
+
+# Affichage graphique
+plot(prev, main = "Prévision sur 6 mois - ARMA(0,12) (IC 95%)")
+
+# Affichage des valeurs numériques
+print(prev)
+```
+
+Nous pouvons ajouter sur la prévision qu'étant donné que nous déduisons pas nos aléas comme des bruits blanc, notre modèle ne capte pas toute l'information et n'est donc pas "bon". On en cherche donc un autre.
+
+
+### Modèle II
+
+#### Significativité des coefficients
+
+Voici toutes les itérations nous permettant d'arriver au modèle II:
+
+```{r}
+reg <- Arima(elec_ts12, order = c(4,0,12), include.mean = TRUE, 
+             fixed = c(NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,0,NA,NA,NA,NA,NA))
+coeftest(reg)
+```
+
+```{r}
+reg <- Arima(elec_ts12, order = c(4,0,12), include.mean = TRUE, 
+             fixed = c(NA,NA,NA,NA,NA,NA,NA,NA,NA,0,NA,0,NA,NA,NA,NA,NA))
+coeftest(reg)
+```
+
+```{r}
+reg <- Arima(elec_ts12, order = c(4,0,12), include.mean = TRUE, 
+             fixed = c(NA,NA,NA,NA,NA,NA,NA,NA,NA,0,0,0,NA,NA,NA,NA,NA))
+coeftest(reg)
+```
+
+```{r}
+reg <- Arima(elec_ts12, order = c(4,0,12), include.mean = TRUE, 
+             fixed = c(NA,NA,0,NA,NA,NA,NA,NA,NA,0,0,0,NA,NA,NA,NA,NA))
+coeftest(reg)
+```
+
+```{r}
+reg <- Arima(elec_ts12, order = c(4,0,12), include.mean = TRUE, 
+             fixed = c(NA,NA,0,NA,NA,NA,NA,0,NA,0,0,0,NA,NA,NA,NA,NA))
+coeftest(reg)
+```
+
+```{r}
+reg <- Arima(elec_ts12, order = c(4,0,12), include.mean = TRUE, 
+             fixed = c(NA,NA,0,NA,NA,NA,NA,0,0,0,0,0,NA,NA,NA,NA,NA))
+coeftest(reg)
+```
+
+```{r}
+reg <- Arima(elec_ts12, order = c(4,0,12), include.mean = TRUE, 
+             fixed = c(NA,NA,0,NA,NA,NA,NA,0,0,0,0,0,NA,NA,0,NA,NA))
+coeftest(reg)
+```
+
+```{r}
+reg <- Arima(elec_ts12, order = c(4,0,12), include.mean = TRUE, 
+             fixed = c(NA,NA,0,NA,NA,NA,0,0,0,0,0,0,NA,NA,0,NA,NA))
+coeftest(reg)
+```
+
+```{r}
+reg <- Arima(elec_ts12, order = c(4,0,12), include.mean = TRUE, 
+             fixed = c(NA,NA,0,NA,NA,NA,0,0,0,0,0,0,NA,0,0,NA,NA))
+coeftest(reg)
+```
+
+```{r}
+reg <- Arima(elec_ts12, order = c(4,0,12), include.mean = TRUE, 
+             fixed = c(NA,NA,0,NA,0,NA,0,0,0,0,0,0,NA,0,0,NA,NA))
+coeftest(reg)
+```
+
+```{r}
+reg <- Arima(elec_ts12, order = c(4,0,12), include.mean = TRUE, 
+             fixed = c(NA,NA,0,0,0,NA,0,0,0,0,0,0,NA,0,0,NA,NA))
+coeftest(reg)
+```
+
+```{r}
+reg <- Arima(elec_ts12, order = c(4,0,12), include.mean = TRUE, 
+             fixed = c(NA,NA,0,0,0,0,0,0,0,0,0,0,NA,0,0,NA,NA))
+coeftest(reg)
+```
+
+```{r}
+reg <- Arima(elec_ts12, order = c(4,0,12), include.mean = TRUE, 
+             fixed = c(NA,NA,0,0,0,0,0,0,0,0,0,0,0,0,0,NA,NA))
+coeftest(reg)
+```
+
+```{r}
+reg <- Arima(elec_ts12, order = c(4,0,12), include.mean = TRUE, 
+             fixed = c(NA,0,0,0,0,0,0,0,0,0,0,0,0,0,0,NA,NA))
+coeftest(reg)
+```
+
+
+## Intégration de la saisonnalité
+
+### Modélisation
+
+Tous les modèles ici avaient un problème soit d'identification des paramètres de MA12 et SMA1 qui capturent la même informations. Ou alors il y'avait aussi (comme le modèle retenus) présence de cluster de volatilité. Ici j'ai représenté les modèles principaux, mais j'en ai bien sur essayés une vigntaines d'autres en touchant au paramètres etc...
+
+#### Modèle I
+
+```{r}
+fixed_vec <- c(NA,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,NA,NA)
+reg2 <- Arima(elec_ts, order = c(4,0,12), include.mean = TRUE,
+              fixed = fixed_vec,
+              seasonal = list(order = c(1,1,1), period = 12))
+coeftest(reg2)
+```
+
+#### Modèle II
+
+```{r}
+fixed_vec <- c(NA,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,NA)
+reg2 <- Arima(elec_ts, order = c(4,0,12), include.mean = TRUE,
+              fixed = fixed_vec,
+              seasonal = list(order = c(0,1,1), period = 12))
+coeftest(reg2)
+```
+
+#### Modèle III
+
+```{r}
+fixed_vec <- c(NA,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,NA)
+reg3 <- Arima(elec_ts, order = c(4,0,12), include.mean = TRUE,
+              fixed = fixed_vec,
+              seasonal = list(order = c(1,1,0), period = 12))
+coeftest(reg3)
+```
+
+#### Modèle IV
+
+```{r}
+fixed_vec <- c(NA,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,NA,NA,0,0,0,NA)
+reg3 <- Arima(elec_ts, order = c(4,0,12), include.mean = TRUE,
+              fixed = fixed_vec,
+              seasonal = list(order = c(3,1,3), period = 12))
+coeftest(reg3)
+```
+
+
+
+# Sources
+
+AG Energiebilanzen (AGEB). Energy Balances for Germany – Historical Electricity Consumption Data.  
+https://ag-energiebilanzen.de
+
+Bundesnetzagentur. SMARD Electricity Market Data Platform.  
+https://www.smard.de
+
+Fraunhofer Institute for Solar Energy Systems (Fraunhofer ISE) (2026).  
+German Public Electricity Generation in 2025: Wind and Solar Power Take the Lead.  
+https://www.ise.fraunhofer.de/en/press-media/press-releases/2026/german-public-electricity-generation-in-2025-wind-and-solar-power-take-the-lead.html
+
+Umweltbundesamt (German Environment Agency).  
+Share of Renewable Energies in Gross Electricity Consumption.  
+https://www.umweltbundesamt.de/en/indicator-share-of-renewables-in-gross-electricity
+
+Federal Ministry for Economic Affairs and Climate Action (BMWK).  
+Nuclear Phase-Out in Germany.  
+https://www.bmwk.de/Redaktion/EN/Dossier/nuclear-phase-out.html
+
+Reuters (2025).  
+Germany’s energy use dropped in 2024, AGEB says.  
+https://www.reuters.com/business/energy/germanys-energy-use-dropped-11-2024-ageb-says-2025-03-18/
+
+Wikipedia contributors.  
+Electricity Sector in Germany.  
+https://en.wikipedia.org/wiki/Electricity_sector_in_Germany
+
+
+
+
+
+
+
+
